@@ -1,0 +1,125 @@
+name: Upload Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      filename:
+        description: "Final file name (e.g., photo.png)"
+        required: true
+        type: string
+      # Use ONE of these: file_url OR content_b64
+      file_url:
+        description: "Public URL to download the image (preferred for large files)"
+        required: false
+        type: string
+      content_b64:
+        description: "Base64-encoded file content (avoid for large files)"
+        required: false
+        type: string
+      subdir:
+        description: "Optional subfolder under uploads/ (default: date-based)"
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  upload:
+    # Needed so the job can push a commit
+    permissions:
+      contents: write
+
+    runs-on: ubuntu-latest
+
+    outputs:
+      raw_url: ${{ steps.compute-url.outputs.raw_url }}
+      web_url: ${{ steps.compute-url.outputs.web_url }}
+      repo_path: ${{ steps.compute-url.outputs.repo_path }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Validate inputs
+        id: validate
+        shell: bash
+        run: |
+          if [ -z "${{ github.event.inputs.file_url }}" ] && [ -z "${{ github.event.inputs.content_b64 }}" ]; then
+            echo "Error: Provide either file_url OR content_b64." >&2
+            exit 1
+          fi
+
+      - name: Sanitize and set paths
+        id: vars
+        shell: bash
+        run: |
+          FILENAME="${{ github.event.inputs.filename }}"
+          # Keep only safe chars for filename
+          BASENAME="$(basename "$FILENAME")"
+          BASENAME="${BASENAME//[^A-Za-z0-9._-]/_}"
+
+          # Optional subdir (or date-based default)
+          SUBDIR="${{ github.event.inputs.subdir }}"
+          SUBDIR="${SUBDIR//[^A-Za-z0-9_\/-]/_}"
+          SUBDIR="${SUBDIR#/}"           # remove leading slash
+          SUBDIR="${SUBDIR%%..*}"        # remove '..'
+
+          if [ -z "$SUBDIR" ]; then
+            SUBDIR="$(date -u +%Y/%m/%d)"
+          fi
+
+          DEST_DIR="uploads/$SUBDIR"
+          DEST_PATH="$DEST_DIR/$BASENAME"
+
+          echo "DEST_DIR=$DEST_DIR" >> $GITHUB_ENV
+          echo "BASENAME=$BASENAME" >> $GITHUB_ENV
+          echo "DEST_PATH=$DEST_PATH" >> $GITHUB_ENV
+
+      - name: Save image to repo
+        shell: bash
+        run: |
+          mkdir -p "$DEST_DIR"
+          if [ -n "${{ github.event.inputs.file_url }}" ]; then
+            curl -L --fail "${{ github.event.inputs.file_url }}" -o "$DEST_PATH"
+          else
+            # Strip any accidental newlines and decode
+            printf "%s" "${{ github.event.inputs.content_b64 }}" | base64 -d > "$DEST_PATH"
+          fi
+
+      - name: Commit and push
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$DEST_PATH"
+          git commit -m "Add image $DEST_PATH"
+          git push
+
+      - name: Compute URLs
+        id: compute-url
+        shell: bash
+        run: |
+          RAW_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/${DEST_PATH}"
+          WEB_URL="https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/${DEST_PATH}?raw=1"
+          echo "raw_url=$RAW_URL" >> $GITHUB_OUTPUT
+          echo "web_url=$WEB_URL" >> $GITHUB_OUTPUT
+          echo "repo_path=$DEST_PATH" >> $GITHUB_OUTPUT
+
+          # Also surface it in the run summary
+          {
+            echo "### ✅ Image uploaded"
+            echo ""
+            echo "**Raw URL:** $RAW_URL"
+            echo ""
+            echo "**Web URL (fallback):** $WEB_URL"
+            echo ""
+            echo "Repo path: \`$DEST_PATH\`"
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: Attach URL artifact (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: uploaded-image-url
+          path: |
+            ${{ github.workspace }}/$GITHUB_STEP_SUMMARY
